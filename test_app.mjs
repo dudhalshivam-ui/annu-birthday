@@ -111,7 +111,7 @@ async function runTests() {
     const isImageVisible1 = await frameImageCh1S1.isVisible();
     assert(isImageVisible1, 'Chapter 01 Slide 01 Photo Frame Image Visible');
     const src1 = await frameImageCh1S1.getAttribute('src');
-    assert(src1 && src1.startsWith('blob:'), 'Chapter 01 Slide 01 Blob URL Generated', `Got src: ${src1}`);
+    assert(src1 && (src1.startsWith('http') || src1.startsWith('blob:')), 'Chapter 01 Slide 01 URL Generated', `Got src: ${src1}`);
 
     await page.click('[data-testid="journey-next-btn"]');
     await page.waitForTimeout(500);

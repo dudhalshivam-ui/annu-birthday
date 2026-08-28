@@ -103,7 +103,7 @@ export const MediaManager: React.FC = () => {
             {([1, 2, 3, 4, 5] as SlotId[]).map((slotId) => {
               const photoKey = `${activeTabChapter}_${slotId}`;
               const slotData = journeyPhotos[photoKey];
-              const isOccupied = Boolean(slotData?.objectUrl);
+              const isOccupied = Boolean(slotData?.imageUrl);
 
               return (
                 <div
@@ -127,9 +127,9 @@ export const MediaManager: React.FC = () => {
                   </div>
 
                   <div className="aspect-[4/3] rounded-xl overflow-hidden bg-gray-950 border border-amber-500/10 relative flex items-center justify-center">
-                    {isOccupied && slotData.objectUrl ? (
+                    {isOccupied && slotData.imageUrl ? (
                       <img 
-                        src={slotData.objectUrl} 
+                       src={slotData.imageUrl} 
                         alt={`Chapter ${activeTabChapter} Photo ${slotId}`}
                         className="w-full h-full object-cover rounded-xl" 
                       />

@@ -4,8 +4,10 @@ export type SlotId = 1 | 2 | 3 | 4 | 5;
 export interface JourneyPhotoSlot {
   chapterId: ChapterId;
   slotId: SlotId;
-  blob: Blob | null;
-  objectUrl: string | null;
+  /** Permanent Cloudinary URL, blob: URL (dev mode), or null (empty slot) */
+  imageUrl: string | null;
+  /** Cloudinary public_id — null in dev/fallback mode */
+  publicId: string | null;
   caption?: string;
   updatedAt?: number;
 }
