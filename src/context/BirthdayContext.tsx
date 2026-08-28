@@ -8,29 +8,19 @@ import type {
   ActiveSection,
   JourneyPhotoSlot,
 } from "../types";
-import { CHAPTER_IDS, SLOT_IDS, getStoragePhoto, setStoragePhoto, deleteStoragePhoto } from "../services/storageService";
-import { uploadToCloudinary, isCloudinaryConfigured } from "../services/cloudinaryService";
-import { loadAllPhotoRows, upsertPhotoRow, deletePhotoRow, isSupabaseConfigured } from "../services/supabasePhotoService";
-import { getAllMemories, persistAddMemory, persistDeleteMemory, seedDefaultMemoriesOnce } from "../services/memoryStorageService";
-
-// ────────────────────────────────────────────────────────────────────────────
-// localStorage cache helpers  (compound key prevents cross-chapter collision)
-// ────────────────────────────────────────────────────────────────────────────
-const LS_NS = "journey";
-
-interface CachedSlotMeta {
-  imageUrl: string;
-  publicId: string;
-  uploadedAt: number;
-}
-
-const lsKey   = (c: ChapterId, s: SlotId) => `${LS_NS}:chapter:${c}:slot:${s}`;
-const lsGet   = (c: ChapterId, s: SlotId): CachedSlotMeta | null => {
-  try { const r = localStorage.getItem(lsKey(c, s)); return r ? JSON.parse(r) : null; } catch { return null; }
-};
-const lsSet   = (c: ChapterId, s: SlotId, m: CachedSlotMeta) =>
-  localStorage.setItem(lsKey(c, s), JSON.stringify(m));
-const lsClear = (c: ChapterId, s: SlotId) => localStorage.removeItem(lsKey(c, s));
+import { CHAPTER_IDS, SLOT_IDS, getStoragePhoto } from "../services/storageService";
+import {
+  uploadJourneyPhoto,
+  fetchAllJourneyPhotos,
+  deleteJourneyPhoto,
+} from "../services/photoService";
+import { isSupabaseConfigured } from "../services/supabaseClient";
+import {
+  getAllMemories,
+  persistAddMemory,
+  persistDeleteMemory,
+  seedDefaultMemoriesOnce,
+} from "../services/memoryStorageService";
 
 // ────────────────────────────────────────────────────────────────────────────
 // Static data
@@ -76,8 +66,6 @@ interface BirthdayContextType {
   getJourneyPhotoUrl: (chapterId: ChapterId, slotId: SlotId) => string | null;
   setJourneyPhoto:    (chapterId: ChapterId, slotId: SlotId, blob: Blob) => Promise<void>;
   clearJourneyPhoto:  (chapterId: ChapterId, slotId: SlotId) => Promise<void>;
-  /** Called by img onError — marks slot as empty without touching storage */
-  markSlotEmpty:      (chapterId: ChapterId, slotId: SlotId) => void;
 
   memories: MemoryItem[];
   addMemory:    (memory: Omit<MemoryItem, "id" | "createdAt">) => Promise<void>;
@@ -93,6 +81,7 @@ interface BirthdayContextType {
   deleteTrack: (id: string) => void;
 
   isStorageLoaded: boolean;
+  isPhotosLoading: boolean;
 }
 
 const BirthdayContext = createContext<BirthdayContextType | undefined>(undefined);
@@ -125,6 +114,7 @@ export const BirthdayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const objectUrlMapRef = useRef<Map<string, string>>(new Map());
 
   const [isStorageLoaded, setIsStorageLoaded] = useState<boolean>(false);
+  const [isPhotosLoading, setIsPhotosLoading] = useState<boolean>(true);
   const [memories, setMemories]               = useState<MemoryItem[]>([]);
   const [tracks, setTracks]                   = useState<Track[]>(INITIAL_TRACKS);
   const [currentTrackIndex, setCurrentTrackIndex] = useState<number>(0);
@@ -135,71 +125,61 @@ export const BirthdayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setActiveSlideIndex(0);
   }, []);
 
-  // ── Initialization ────────────────────────────────────────────────────────
+  // ── Initialization: Load Photos from Supabase (or local fallback) ───────────
   useEffect(() => {
     let isMounted = true;
 
     const initialize = async () => {
+      setIsPhotosLoading(true);
       const loadedPhotos: Record<string, JourneyPhotoSlot> = {};
 
-      // ── (A) Determine photo URLs for all 25 slots ──────────────────────
-      if (isCloudinaryConfigured() && isSupabaseConfigured()) {
-        // PRODUCTION MODE: Supabase is the cross-device source of truth.
-        // Load all rows from Supabase, then update localStorage cache.
-        const rows = await loadAllPhotoRows();
-        const rowMap: Record<string, typeof rows[number]> = {};
-        for (const row of rows) {
-          rowMap[`${row.chapter_id}_${row.slot_id}`] = row;
+      // Initialize all 25 slots as empty by default
+      for (const chapterId of CHAPTER_IDS) {
+        for (const slotId of SLOT_IDS) {
+          loadedPhotos[`${chapterId}_${slotId}`] = {
+            chapterId,
+            slotId,
+            imageUrl: null,
+            publicId: null,
+          };
         }
+      }
 
+      if (isSupabaseConfigured()) {
+        // PRODUCTION: Fetch from Supabase database `photos` table
+        const photoRecords = await fetchAllJourneyPhotos();
+        for (const record of photoRecords) {
+          const key = `${record.chapter_id}_${record.slot_id}`;
+          loadedPhotos[key] = {
+            chapterId: record.chapter_id as ChapterId,
+            slotId: record.slot_id as SlotId,
+            imageUrl: record.file_url,
+            publicId: record.file_path,
+            updatedAt: record.created_at ? new Date(record.created_at).getTime() : Date.now(),
+          };
+        }
+      } else {
+        // DEV FALLBACK: IndexedDB + blob URLs (local development without Supabase credentials)
         for (const chapterId of CHAPTER_IDS) {
           for (const slotId of SLOT_IDS) {
             const ck = `${chapterId}_${slotId}`;
-            const row = rowMap[ck];
-            if (row) {
-              // Update localStorage cache with Supabase data
-              lsSet(chapterId as ChapterId, slotId, {
-                imageUrl:   row.image_url,
-                publicId:   row.public_id,
-                uploadedAt: row.uploaded_at,
-              });
-              loadedPhotos[ck] = { chapterId: chapterId as ChapterId, slotId, imageUrl: row.image_url, publicId: row.public_id, updatedAt: row.uploaded_at };
-            } else {
-              // Supabase has no entry → slot is empty (remove stale cache if any)
-              lsClear(chapterId as ChapterId, slotId);
-              loadedPhotos[ck] = { chapterId: chapterId as ChapterId, slotId, imageUrl: null, publicId: null };
-            }
-          }
-        }
-      } else if (isCloudinaryConfigured()) {
-        // CLOUDINARY-ONLY MODE: Use localStorage cache, no cross-device registry.
-        for (const chapterId of CHAPTER_IDS) {
-          for (const slotId of SLOT_IDS) {
-            const ck   = `${chapterId}_${slotId}`;
-            const meta = lsGet(chapterId as ChapterId, slotId);
-            loadedPhotos[ck] = meta
-              ? { chapterId: chapterId as ChapterId, slotId, imageUrl: meta.imageUrl, publicId: meta.publicId, updatedAt: meta.uploadedAt }
-              : { chapterId: chapterId as ChapterId, slotId, imageUrl: null, publicId: null };
-          }
-        }
-      } else {
-        // DEV FALLBACK: IndexedDB + blob URLs (local development only)
-        for (const chapterId of CHAPTER_IDS) {
-          for (const slotId of SLOT_IDS) {
-            const ck   = `${chapterId}_${slotId}`;
-            const blob = await getStoragePhoto(chapterId as ChapterId, slotId);
+            const blob = await getStoragePhoto(chapterId, slotId);
             if (blob) {
               const url = URL.createObjectURL(blob);
               objectUrlMapRef.current.set(ck, url);
-              loadedPhotos[ck] = { chapterId: chapterId as ChapterId, slotId, imageUrl: url, publicId: null, updatedAt: Date.now() };
-            } else {
-              loadedPhotos[ck] = { chapterId: chapterId as ChapterId, slotId, imageUrl: null, publicId: null };
+              loadedPhotos[ck] = {
+                chapterId,
+                slotId,
+                imageUrl: url,
+                publicId: null,
+                updatedAt: Date.now(),
+              };
             }
           }
         }
       }
 
-      // ── (B) Memories ──────────────────────────────────────────────────
+      // Memories: seed defaults on FIRST LAUNCH ONLY
       await seedDefaultMemoriesOnce(INITIAL_MEMORIES);
       const loadedMemories = await getAllMemories();
 
@@ -208,6 +188,7 @@ export const BirthdayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         setJourneyPhotos(loadedPhotos);
         setMemories(loadedMemories);
         setIsStorageLoaded(true);
+        setIsPhotosLoading(false);
       }
     };
 
@@ -237,78 +218,52 @@ export const BirthdayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     [journeyPhotos]
   );
 
-  // ── Upload ────────────────────────────────────────────────────────────────
+  // ── Upload Photo: Supabase Storage -> Supabase Database -> State ────────────
   const setJourneyPhoto = useCallback(
     async (chapterId: ChapterId, slotId: SlotId, blob: Blob): Promise<void> => {
       const ck = `${chapterId}_${slotId}`;
-      let imageUrl: string;
-      let publicId: string;
+      const { imageUrl, filePath } = await uploadJourneyPhoto(chapterId, slotId, blob);
 
-      if (isCloudinaryConfigured()) {
-        // Step 1: Upload file → Cloudinary → get permanent public URL
-        const result = await uploadToCloudinary(chapterId, slotId, blob);
-        imageUrl  = result.secureUrl;
-        publicId  = result.publicId;
+      const slot: JourneyPhotoSlot = {
+        chapterId,
+        slotId,
+        imageUrl,
+        publicId: filePath,
+        updatedAt: Date.now(),
+      };
 
-        // Step 2: Persist to Supabase (cross-device registry)
-        if (isSupabaseConfigured()) {
-          await upsertPhotoRow({ chapter_id: chapterId, slot_id: slotId, image_url: imageUrl, public_id: publicId, uploaded_at: Date.now() });
-        }
-
-        // Step 3: Update localStorage cache (fast load on same device next time)
-        lsSet(chapterId, slotId, { imageUrl, publicId, uploadedAt: Date.now() });
-      } else {
-        // DEV fallback: store blob in IndexedDB and use blob URL
-        await setStoragePhoto(chapterId, slotId, blob);
-        const oldUrl = objectUrlMapRef.current.get(ck);
-        if (oldUrl) URL.revokeObjectURL(oldUrl);
-        imageUrl = URL.createObjectURL(blob);
-        objectUrlMapRef.current.set(ck, imageUrl);
-        publicId = "";
-      }
-
-      const slot: JourneyPhotoSlot = { chapterId, slotId, imageUrl, publicId, updatedAt: Date.now() };
       journeyPhotosRef.current = { ...journeyPhotosRef.current, [ck]: slot };
       setJourneyPhotos((prev) => ({ ...prev, [ck]: slot }));
     },
     []
   );
 
-  // ── Clear slot ────────────────────────────────────────────────────────────
+  // ── Clear slot: Supabase Storage + Database deletion ───────────────────────
   const clearJourneyPhoto = useCallback(
     async (chapterId: ChapterId, slotId: SlotId): Promise<void> => {
       const ck = `${chapterId}_${slotId}`;
+      await deleteJourneyPhoto(chapterId, slotId);
 
-      // Remove from all storage layers
-      lsClear(chapterId, slotId);
-      if (isSupabaseConfigured()) {
-        await deletePhotoRow(chapterId, slotId).catch(console.error);
-      }
-      try { await deleteStoragePhoto(chapterId, slotId); } catch { /* ignore */ }
-
-      // Revoke blob URL if any (dev mode)
+      // Revoke blob URL if any (dev fallback)
       const oldUrl = objectUrlMapRef.current.get(ck);
-      if (oldUrl) { URL.revokeObjectURL(oldUrl); objectUrlMapRef.current.delete(ck); }
+      if (oldUrl) {
+        URL.revokeObjectURL(oldUrl);
+        objectUrlMapRef.current.delete(ck);
+      }
 
-      const slot: JourneyPhotoSlot = { chapterId, slotId, imageUrl: null, publicId: null, updatedAt: Date.now() };
+      const slot: JourneyPhotoSlot = {
+        chapterId,
+        slotId,
+        imageUrl: null,
+        publicId: null,
+        updatedAt: Date.now(),
+      };
+
       journeyPhotosRef.current = { ...journeyPhotosRef.current, [ck]: slot };
       setJourneyPhotos((prev) => ({ ...prev, [ck]: slot }));
     },
     []
   );
-
-  /**
-   * markSlotEmpty — called by <img onError> when a URL fails to load.
-   * Only updates React state; does NOT write to any storage.
-   * This handles the case where a Cloudinary URL exists in state but the
-   * image was deleted or hasn't been uploaded yet on a new device.
-   */
-  const markSlotEmpty = useCallback((chapterId: ChapterId, slotId: SlotId): void => {
-    const ck = `${chapterId}_${slotId}`;
-    const slot: JourneyPhotoSlot = { chapterId, slotId, imageUrl: null, publicId: null, updatedAt: Date.now() };
-    journeyPhotosRef.current = { ...journeyPhotosRef.current, [ck]: slot };
-    setJourneyPhotos((prev) => ({ ...prev, [ck]: slot }));
-  }, []);
 
   // ── Memories ──────────────────────────────────────────────────────────────
   const addMemory = useCallback(async (newMem: Omit<MemoryItem, "id" | "createdAt">): Promise<void> => {
@@ -338,11 +293,12 @@ export const BirthdayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         activeSlideIndex, setActiveSlideIndex,
         journeyPhotos,
         getJourneyPhoto, getJourneyPhotoUrl,
-        setJourneyPhoto, clearJourneyPhoto, markSlotEmpty,
+        setJourneyPhoto, clearJourneyPhoto,
         memories, addMemory, deleteMemory,
         tracks, currentTrackIndex, isPlaying, setIsPlaying,
         playNextTrack, playPrevTrack, addTrack, deleteTrack,
         isStorageLoaded,
+        isPhotosLoading,
       }}
     >
       {children}

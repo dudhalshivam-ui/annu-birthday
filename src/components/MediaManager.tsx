@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
-import { useBirthday, CHAPTER_DEFINITIONS } from '../context/BirthdayContext';
-import type { ChapterId, SlotId } from '../types';
-import { X, Upload, RefreshCw, Trash2, Camera, CheckCircle2 } from 'lucide-react';
+﻿import React, { useState } from "react";
+import { useBirthday, CHAPTER_DEFINITIONS } from "../context/BirthdayContext";
+import type { ChapterId, SlotId } from "../types";
+import { X, Upload, RefreshCw, Trash2, Camera, CheckCircle2, Loader2 } from "lucide-react";
 
 export const MediaManager: React.FC = () => {
   const { 
@@ -12,7 +12,9 @@ export const MediaManager: React.FC = () => {
     clearJourneyPhoto 
   } = useBirthday();
 
-  const [activeTabChapter, setActiveTabChapter] = useState<ChapterId>('chapter-01');
+  const [activeTabChapter, setActiveTabChapter] = useState<ChapterId>("chapter-01");
+  const [uploadingSlotKey, setUploadingSlotKey] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   if (!isMediaManagerOpen) return null;
 
@@ -20,13 +22,20 @@ export const MediaManager: React.FC = () => {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    const slotKey = `${chapterId}_${slotId}`;
+    setUploadingSlotKey(slotKey);
+    setUploadError(null);
+
     try {
       await setJourneyPhoto(chapterId, slotId, file);
-    } catch (error) {
+    } catch (error: any) {
       console.error(`Failed to upload image for ${chapterId} slot ${slotId}:`, error);
-      alert('Error uploading photo. Please try another image.');
+      const errMsg = error?.message || "Error uploading photo. Please try another image.";
+      setUploadError(errMsg);
+      alert(errMsg);
     } finally {
-      e.target.value = '';
+      setUploadingSlotKey(null);
+      e.target.value = "";
     }
   };
 
@@ -70,6 +79,15 @@ export const MediaManager: React.FC = () => {
           </button>
         </div>
 
+        {uploadError && (
+          <div className="p-3 rounded-xl bg-rose-950/60 border border-rose-500/30 text-rose-200 text-xs flex items-center justify-between">
+            <span>{uploadError}</span>
+            <button onClick={() => setUploadError(null)} className="text-rose-400 hover:text-white">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
         <div className="flex items-center gap-2 overflow-x-auto pb-2 no-scrollbar border-b border-amber-500/10">
           {CHAPTER_DEFINITIONS.map((ch) => {
             const isActive = activeTabChapter === ch.id;
@@ -79,8 +97,8 @@ export const MediaManager: React.FC = () => {
                 onClick={() => setActiveTabChapter(ch.id as ChapterId)}
                 className={`px-4 py-2.5 rounded-xl text-xs font-semibold tracking-wider flex-shrink-0 transition-all ${
                   isActive
-                    ? 'bg-amber-950 text-amber-200 border border-amber-400/40 shadow-lg'
-                    : 'bg-black/40 text-gray-400 border border-amber-500/10 hover:text-amber-100'
+                    ? "bg-amber-950 text-amber-200 border border-amber-400/40 shadow-lg"
+                    : "bg-black/40 text-gray-400 border border-amber-500/10 hover:text-amber-100"
                 }`}
               >
                 {ch.badge} — {ch.title}
@@ -104,6 +122,7 @@ export const MediaManager: React.FC = () => {
               const photoKey = `${activeTabChapter}_${slotId}`;
               const slotData = journeyPhotos[photoKey];
               const isOccupied = Boolean(slotData?.imageUrl);
+              const isUploading = uploadingSlotKey === photoKey;
 
               return (
                 <div
@@ -115,7 +134,11 @@ export const MediaManager: React.FC = () => {
                     <span className="font-mono text-amber-300 font-bold">
                       PHOTO 0{slotId}
                     </span>
-                    {isOccupied ? (
+                    {isUploading ? (
+                      <span className="px-2 py-0.5 rounded-full bg-amber-950/80 border border-amber-500/30 text-amber-300 text-[10px] font-medium flex items-center gap-1">
+                        <Loader2 className="w-3 h-3 animate-spin" /> Uploading
+                      </span>
+                    ) : isOccupied ? (
                       <span className="px-2 py-0.5 rounded-full bg-emerald-950/80 border border-emerald-500/30 text-emerald-300 text-[10px] font-medium flex items-center gap-1">
                         <CheckCircle2 className="w-3 h-3" /> Occupied
                       </span>
@@ -127,9 +150,14 @@ export const MediaManager: React.FC = () => {
                   </div>
 
                   <div className="aspect-[4/3] rounded-xl overflow-hidden bg-gray-950 border border-amber-500/10 relative flex items-center justify-center">
-                    {isOccupied && slotData.imageUrl ? (
+                    {isUploading ? (
+                      <div className="flex flex-col items-center justify-center p-3 text-center space-y-2 text-amber-300">
+                        <Loader2 className="w-8 h-8 animate-spin text-amber-400" />
+                        <span className="text-[10px] font-medium tracking-wider uppercase">Saving to Cloud...</span>
+                      </div>
+                    ) : isOccupied && slotData.imageUrl ? (
                       <img 
-                       src={slotData.imageUrl} 
+                        src={slotData.imageUrl} 
                         alt={`Chapter ${activeTabChapter} Photo ${slotId}`}
                         className="w-full h-full object-cover rounded-xl" 
                       />
@@ -144,16 +172,24 @@ export const MediaManager: React.FC = () => {
                   <div className="space-y-2 pt-1">
                     <label 
                       data-testid={`media-upload-label-${activeTabChapter}-${slotId}`}
-                      className="w-full py-2 px-3 rounded-xl text-xs font-semibold tracking-wider text-amber-200 bg-amber-950/60 border border-amber-500/30 hover:border-amber-400 hover:bg-amber-900/80 cursor-pointer flex items-center justify-center gap-1.5 transition-all text-center"
+                      className={`w-full py-2 px-3 rounded-xl text-xs font-semibold tracking-wider text-amber-200 bg-amber-950/60 border border-amber-500/30 hover:border-amber-400 hover:bg-amber-900/80 cursor-pointer flex items-center justify-center gap-1.5 transition-all text-center ${
+                        isUploading ? "opacity-50 pointer-events-none" : ""
+                      }`}
                     >
                       <input 
                         type="file" 
-                        accept="image/*" 
+                        accept="image/jpeg,image/png,image/webp,image/jpg" 
                         data-testid={`media-upload-${activeTabChapter}-${slotId}`}
                         onChange={(e) => handleFileUpload(activeTabChapter, slotId, e)}
+                        disabled={isUploading}
                         className="hidden" 
                       />
-                      {isOccupied ? (
+                      {isUploading ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-300" />
+                          <span>Uploading...</span>
+                        </>
+                      ) : isOccupied ? (
                         <>
                           <RefreshCw className="w-3.5 h-3.5 text-amber-300" />
                           <span>Replace</span>
@@ -166,7 +202,7 @@ export const MediaManager: React.FC = () => {
                       )}
                     </label>
 
-                    {isOccupied && (
+                    {isOccupied && !isUploading && (
                       <button
                         data-testid={`media-clear-${activeTabChapter}-${slotId}`}
                         onClick={() => handleClear(activeTabChapter, slotId)}
@@ -185,12 +221,12 @@ export const MediaManager: React.FC = () => {
         </div>
 
         <div className="pt-4 border-t border-amber-500/15 flex items-center justify-between text-xs text-gray-400">
-          <span>All 25 slots persist automatically to IndexedDB.</span>
+          <span>Photos sync permanently to Supabase Storage &amp; Database.</span>
           <button
             onClick={() => setIsMediaManagerOpen(false)}
             className="px-6 py-2.5 rounded-full bg-gradient-to-r from-amber-600 via-rose-700 to-amber-700 text-white font-semibold tracking-wider text-xs shadow-md hover:scale-105 transition-transform"
           >
-            Done & View Journey
+            Done &amp; View Journey
           </button>
         </div>
 

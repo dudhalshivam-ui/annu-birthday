@@ -6,7 +6,8 @@ import {
   ChevronRight, 
   Sparkles, 
   Camera, 
-  Upload 
+  Upload,
+  Loader2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -17,7 +18,8 @@ export const JourneySection: React.FC = () => {
     activeSlideIndex,
     setActiveSlideIndex,
     getJourneyPhotoUrl,
-    setIsMediaManagerOpen
+    setIsMediaManagerOpen,
+    isPhotosLoading
   } = useBirthday();
 
   const currentChapter = CHAPTER_DEFINITIONS.find((c) => c.id === activeChapterId) || CHAPTER_DEFINITIONS[0];
@@ -147,7 +149,20 @@ export const JourneySection: React.FC = () => {
             className="relative aspect-[4/3] rounded-2xl overflow-hidden bg-black/80 border border-amber-500/20 flex items-center justify-center group select-none shadow-inner"
           >
             <AnimatePresence mode="wait">
-              {currentPhotoUrl ? (
+              {isPhotosLoading ? (
+                <motion.div
+                  key="loading-photos"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="flex flex-col items-center justify-center p-8 text-center space-y-3"
+                >
+                  <Loader2 className="w-10 h-10 animate-spin text-amber-400" />
+                  <span className="text-xs font-serif text-amber-200 tracking-wider">
+                    Loading photos from cloud...
+                  </span>
+                </motion.div>
+              ) : currentPhotoUrl ? (
                 <motion.img
                   key={`${activeChapterId}-${currentSlotId}-${currentPhotoUrl}`}
                   initial={{ opacity: 0, scale: 0.98 }}
