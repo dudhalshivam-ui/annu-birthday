@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from "react";
+﻿import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from "react";
 import type {
   ChapterId,
   SlotId,
@@ -14,6 +14,12 @@ import {
   fetchAllJourneyPhotos,
   deleteJourneyPhoto,
 } from "../services/photoService";
+import {
+  fetchAllMusicTracks,
+  uploadAudioTrack,
+  addExternalTrack,
+  deleteMusicTrack,
+} from "../services/musicService";
 import { isSupabaseConfigured } from "../services/supabaseClient";
 import {
   getAllMemories,
@@ -48,6 +54,13 @@ export const INITIAL_TRACKS: Track[] = [
 // ────────────────────────────────────────────────────────────────────────────
 // Context type
 // ────────────────────────────────────────────────────────────────────────────
+export interface AddTrackParams {
+  title: string;
+  artist: string;
+  audioUrl?: string;
+  file?: File | Blob;
+}
+
 interface BirthdayContextType {
   activeSection: ActiveSection;
   setActiveSection: (section: ActiveSection) => void;
@@ -77,11 +90,12 @@ interface BirthdayContextType {
   setIsPlaying: (playing: boolean) => void;
   playNextTrack: () => void;
   playPrevTrack: () => void;
-  addTrack:    (track: Omit<Track, "id">) => void;
-  deleteTrack: (id: string) => void;
+  addTrack:    (params: AddTrackParams) => Promise<void>;
+  deleteTrack: (id: string) => Promise<void>;
 
   isStorageLoaded: boolean;
   isPhotosLoading: boolean;
+  isMusicLoading: boolean;
 }
 
 const BirthdayContext = createContext<BirthdayContextType | undefined>(undefined);
@@ -115,6 +129,7 @@ export const BirthdayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const [isStorageLoaded, setIsStorageLoaded] = useState<boolean>(false);
   const [isPhotosLoading, setIsPhotosLoading] = useState<boolean>(true);
+  const [isMusicLoading, setIsMusicLoading]   = useState<boolean>(true);
   const [memories, setMemories]               = useState<MemoryItem[]>([]);
   const [tracks, setTracks]                   = useState<Track[]>(INITIAL_TRACKS);
   const [currentTrackIndex, setCurrentTrackIndex] = useState<number>(0);
@@ -125,12 +140,13 @@ export const BirthdayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setActiveSlideIndex(0);
   }, []);
 
-  // ── Initialization: Load Photos from Supabase (or local fallback) ───────────
+  // ── Initialization: Load Photos & Music from Supabase (or local fallback) ──
   useEffect(() => {
     let isMounted = true;
 
     const initialize = async () => {
       setIsPhotosLoading(true);
+      setIsMusicLoading(true);
       const loadedPhotos: Record<string, JourneyPhotoSlot> = {};
 
       // Initialize all 25 slots as empty by default
@@ -145,8 +161,8 @@ export const BirthdayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         }
       }
 
+      // 1. Photos from Supabase
       if (isSupabaseConfigured()) {
-        // PRODUCTION: Fetch from Supabase database `photos` table
         const photoRecords = await fetchAllJourneyPhotos();
         for (const record of photoRecords) {
           const key = `${record.chapter_id}_${record.slot_id}`;
@@ -159,7 +175,7 @@ export const BirthdayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           };
         }
       } else {
-        // DEV FALLBACK: IndexedDB + blob URLs (local development without Supabase credentials)
+        // DEV FALLBACK: IndexedDB + blob URLs
         for (const chapterId of CHAPTER_IDS) {
           for (const slotId of SLOT_IDS) {
             const ck = `${chapterId}_${slotId}`;
@@ -179,16 +195,27 @@ export const BirthdayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         }
       }
 
-      // Memories: seed defaults on FIRST LAUNCH ONLY
+      // 2. Music from Supabase
+      let loadedTracks: Track[] = INITIAL_TRACKS;
+      if (isSupabaseConfigured()) {
+        const dbTracks = await fetchAllMusicTracks();
+        if (dbTracks.length > 0) {
+          loadedTracks = dbTracks;
+        }
+      }
+
+      // 3. Memories: seed defaults on FIRST LAUNCH ONLY
       await seedDefaultMemoriesOnce(INITIAL_MEMORIES);
       const loadedMemories = await getAllMemories();
 
       if (isMounted) {
         journeyPhotosRef.current = loadedPhotos;
         setJourneyPhotos(loadedPhotos);
+        setTracks(loadedTracks);
         setMemories(loadedMemories);
         setIsStorageLoaded(true);
         setIsPhotosLoading(false);
+        setIsMusicLoading(false);
       }
     };
 
@@ -276,11 +303,38 @@ export const BirthdayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setMemories((prev) => prev.filter((m) => m.id !== id));
   }, []);
 
-  // ── Music ─────────────────────────────────────────────────────────────────
+  // ── Music (Supabase Storage + Database) ───────────────────────────────────
   const playNextTrack = useCallback(() => setCurrentTrackIndex((p) => (p + 1) % tracks.length), [tracks.length]);
   const playPrevTrack = useCallback(() => setCurrentTrackIndex((p) => (p - 1 + tracks.length) % tracks.length), [tracks.length]);
-  const addTrack    = useCallback((track: Omit<Track, "id">) => setTracks((prev) => [...prev, { ...track, id: `track-${Date.now()}` }]), []);
-  const deleteTrack = useCallback((id: string) => setTracks((prev) => prev.filter((t) => t.id !== id)), []);
+
+  const addTrack = useCallback(
+    async (params: AddTrackParams): Promise<void> => {
+      let newTrack: Track;
+      if (params.file) {
+        newTrack = await uploadAudioTrack(params.file, params.title, params.artist);
+      } else if (params.audioUrl) {
+        newTrack = await addExternalTrack(params.title, params.artist, params.audioUrl);
+      } else {
+        throw new Error("Please provide either an audio file or an audio URL.");
+      }
+
+      setTracks((prev) => [...prev, newTrack]);
+    },
+    []
+  );
+
+  const deleteTrack = useCallback(
+    async (id: string): Promise<void> => {
+      const trackToDelete = tracks.find((t) => t.id === id);
+      await deleteMusicTrack(id, trackToDelete?.filePath);
+
+      setTracks((prev) => {
+        const filtered = prev.filter((t) => t.id !== id);
+        return filtered.length > 0 ? filtered : INITIAL_TRACKS;
+      });
+    },
+    [tracks]
+  );
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -299,6 +353,7 @@ export const BirthdayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         playNextTrack, playPrevTrack, addTrack, deleteTrack,
         isStorageLoaded,
         isPhotosLoading,
+        isMusicLoading,
       }}
     >
       {children}

@@ -39,7 +39,9 @@ export interface Track {
   title: string;
   artist: string;
   audioUrl: string;
+  filePath?: string;
   chapterId?: string;
+  createdAt?: number;
 }
 
 export type ActiveSection = 'home' | 'journey' | 'letter' | 'memories';
