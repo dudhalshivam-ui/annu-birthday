@@ -1,10 +1,21 @@
-﻿import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useRef } from "react";
 import { useBirthday } from "../context/BirthdayContext";
 import type { MemoryCategory, MemoryItem } from "../types";
-import { Sparkles, Heart, Plus, X, Calendar, Trash2, AlertCircle } from "lucide-react";
+import {
+  Sparkles,
+  Heart,
+  Plus,
+  X,
+  Calendar,
+  Trash2,
+  AlertCircle,
+  Loader2,
+  CloudUpload,
+} from "lucide-react";
+import { isSupabaseConfigured } from "../services/supabaseClient";
 
 export const MemoriesSection: React.FC = () => {
-  const { memories, addMemory, deleteMemory } = useBirthday();
+  const { memories, addMemory, deleteMemory, isMemoriesLoading } = useBirthday();
 
   const [activeCategory, setActiveCategory] = useState<MemoryCategory>("ALL");
   const [selectedMemory, setSelectedMemory] = useState<MemoryItem | null>(null);
@@ -16,11 +27,17 @@ export const MemoriesSection: React.FC = () => {
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
   // Add form state
-  const [newTitle, setNewTitle] = useState("");
-  const [newDate, setNewDate] = useState("");
-  const [newCategory, setNewCategory] = useState<MemoryCategory>("US");
-  const [newImageUrl, setNewImageUrl] = useState("");
-  const [newCaption, setNewCaption] = useState("");
+  const [newTitle, setNewTitle]         = useState("");
+  const [newDate, setNewDate]           = useState("");
+  const [newCategory, setNewCategory]   = useState<MemoryCategory>("US");
+  const [newImageUrl, setNewImageUrl]   = useState("");
+  const [newCaption, setNewCaption]     = useState("");
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [isUploading, setIsUploading]   = useState(false);
+  const [uploadError, setUploadError]   = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const cloudEnabled = isSupabaseConfigured();
 
   const categories: MemoryCategory[] = [
     "ALL",
@@ -38,28 +55,51 @@ export const MemoriesSection: React.FC = () => {
   // ── Add handler ──────────────────────────────────────────────────────
   const handleAddSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newTitle || !newImageUrl) {
-      alert("Please provide a title and image URL");
+    setUploadError(null);
+
+    if (!newTitle.trim()) {
+      setUploadError("Please provide a memory title.");
       return;
     }
-    await addMemory({
-      title: newTitle,
-      date: newDate || "Special Day",
-      category: newCategory,
-      imageUrl: newImageUrl,
-      caption: newCaption,
-    });
-    setNewTitle("");
-    setNewDate("");
-    setNewImageUrl("");
-    setNewCaption("");
-    setIsAddModalOpen(false);
+    if (!selectedFile && !newImageUrl.trim()) {
+      setUploadError("Please select an image file or paste an image URL.");
+      return;
+    }
+
+    setIsUploading(true);
+    try {
+      await addMemory({
+        title:     newTitle,
+        date:      newDate || "Special Day",
+        category:  newCategory,
+        caption:   newCaption,
+        imageFile: selectedFile ?? undefined,
+        imageUrl:  selectedFile ? undefined : newImageUrl.trim(),
+      });
+
+      // Reset form
+      setNewTitle("");
+      setNewDate("");
+      setNewImageUrl("");
+      setNewCaption("");
+      setSelectedFile(null);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      setIsAddModalOpen(false);
+    } catch (err: unknown) {
+      setUploadError(
+        err instanceof Error ? err.message : "Failed to save memory. Please try again."
+      );
+    } finally {
+      setIsUploading(false);
+    }
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      setNewImageUrl(URL.createObjectURL(file));
+      setSelectedFile(file);
+      setNewImageUrl(""); // clear URL when file is picked
+      setUploadError(null);
     }
   };
 
@@ -83,13 +123,12 @@ export const MemoriesSection: React.FC = () => {
     setIsDeleting(true);
     setDeleteError(null);
     try {
-      // deleteMemory: IndexedDB delete MUST succeed before UI state changes
       await deleteMemory(memoryToDelete.id);
       setMemoryToDelete(null);
     } catch (err) {
       console.error("[MemoriesSection] Failed to delete memory:", err);
       setDeleteError(
-        "Could not delete this memory. Storage error — please try again."
+        "Could not delete this memory. Please try again."
       );
     } finally {
       setIsDeleting(false);
@@ -195,75 +234,82 @@ export const MemoriesSection: React.FC = () => {
       )}
 
       {/* ── Memory grid ─────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-        {filteredMemories.length === 0 ? (
-          <div className="col-span-full text-center py-16 space-y-4">
-            <p className="text-amber-200/70 text-base font-light">
-              No memories yet
-            </p>
-            <button
-              onClick={() => setIsAddModalOpen(true)}
-              className="px-5 py-2.5 rounded-full text-sm font-semibold text-amber-300 bg-amber-950/60 border border-amber-500/40 hover:border-amber-400 hover:scale-105 transition-all flex items-center gap-2 mx-auto"
-            >
-              <Plus className="w-4 h-4 text-amber-400" />
-              Add Memory
-            </button>
-          </div>
-        ) : (
-          filteredMemories.map((mem) => (
-            <div
-              key={mem.id}
-              data-testid="memory-card"
-              data-memory-id={mem.id}
-              onClick={() => setSelectedMemory(mem)}
-              className="group relative rounded-3xl overflow-hidden glass-panel border border-amber-500/20 hover:border-amber-400/50 transition-all duration-500 cursor-pointer flex flex-col justify-between hover:-translate-y-1 shadow-lg"
-            >
-              {/* Delete button — top-right corner of image */}
+      {isMemoriesLoading ? (
+        <div className="flex flex-col items-center justify-center py-20 gap-3 text-amber-400/70">
+          <Loader2 className="w-8 h-8 animate-spin" />
+          <p className="text-sm font-light">Loading memories from cloud…</p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+          {filteredMemories.length === 0 ? (
+            <div className="col-span-full text-center py-16 space-y-4">
+              <p className="text-amber-200/70 text-base font-light">
+                No memories yet
+              </p>
               <button
-                data-testid="delete-memory"
-                onClick={(e) => handleDeleteClick(e, mem)}
-                className="absolute top-2 right-2 z-10 p-1.5 rounded-full bg-black/60 hover:bg-rose-900/80 border border-transparent hover:border-rose-500/40 transition-all duration-200 opacity-0 group-hover:opacity-100 focus:opacity-100"
-                aria-label={`Delete memory: ${mem.title}`}
-                title="Delete memory"
+                onClick={() => setIsAddModalOpen(true)}
+                className="px-5 py-2.5 rounded-full text-sm font-semibold text-amber-300 bg-amber-950/60 border border-amber-500/40 hover:border-amber-400 hover:scale-105 transition-all flex items-center gap-2 mx-auto"
               >
-                <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                <Plus className="w-4 h-4 text-amber-400" />
+                Add Memory
               </button>
-
-              <div className="aspect-[4/3] overflow-hidden bg-black relative">
-                <img
-                  src={mem.imageUrl}
-                  alt={mem.title}
-                  className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700"
-                />
-                <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-80 group-hover:opacity-60 transition-opacity" />
-
-                <div className="absolute top-3 left-3 px-3 py-1 rounded-full bg-black/60 backdrop-blur-md border border-amber-500/30 text-[10px] font-mono tracking-wider text-amber-300">
-                  {mem.category}
-                </div>
-              </div>
-
-              <div className="p-4 space-y-2">
-                <div className="flex items-center justify-between text-xs text-gray-400">
-                  <span className="flex items-center gap-1">
-                    <Calendar className="w-3 h-3 text-amber-400" /> {mem.date}
-                  </span>
-                  <Heart className="w-3.5 h-3.5 text-rose-500 fill-rose-500/30" />
-                </div>
-
-                <h3 className="font-serif text-lg text-amber-100 font-semibold group-hover:text-amber-300 transition-colors">
-                  {mem.title}
-                </h3>
-
-                {mem.caption && (
-                  <p className="text-xs text-gray-300/80 font-light line-clamp-2">
-                    {mem.caption}
-                  </p>
-                )}
-              </div>
             </div>
-          ))
-        )}
-      </div>
+          ) : (
+            filteredMemories.map((mem) => (
+              <div
+                key={mem.id}
+                data-testid="memory-card"
+                data-memory-id={mem.id}
+                onClick={() => setSelectedMemory(mem)}
+                className="group relative rounded-3xl overflow-hidden glass-panel border border-amber-500/20 hover:border-amber-400/50 transition-all duration-500 cursor-pointer flex flex-col justify-between hover:-translate-y-1 shadow-lg"
+              >
+                {/* Delete button — top-right corner of image */}
+                <button
+                  data-testid="delete-memory"
+                  onClick={(e) => handleDeleteClick(e, mem)}
+                  className="absolute top-2 right-2 z-10 p-1.5 rounded-full bg-black/60 hover:bg-rose-900/80 border border-transparent hover:border-rose-500/40 transition-all duration-200 opacity-0 group-hover:opacity-100 focus:opacity-100"
+                  aria-label={`Delete memory: ${mem.title}`}
+                  title="Delete memory"
+                >
+                  <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                </button>
+
+                <div className="aspect-[4/3] overflow-hidden bg-black relative">
+                  <img
+                    src={mem.imageUrl}
+                    alt={mem.title}
+                    className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700"
+                  />
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-80 group-hover:opacity-60 transition-opacity" />
+
+                  <div className="absolute top-3 left-3 px-3 py-1 rounded-full bg-black/60 backdrop-blur-md border border-amber-500/30 text-[10px] font-mono tracking-wider text-amber-300">
+                    {mem.category}
+                  </div>
+                </div>
+
+                <div className="p-4 space-y-2">
+                  <div className="flex items-center justify-between text-xs text-gray-400">
+                    <span className="flex items-center gap-1">
+                      <Calendar className="w-3 h-3 text-amber-400" /> {mem.date}
+                    </span>
+                    <Heart className="w-3.5 h-3.5 text-rose-500 fill-rose-500/30" />
+                  </div>
+
+                  <h3 className="font-serif text-lg text-amber-100 font-semibold group-hover:text-amber-300 transition-colors">
+                    {mem.title}
+                  </h3>
+
+                  {mem.caption && (
+                    <p className="text-xs text-gray-300/80 font-light line-clamp-2">
+                      {mem.caption}
+                    </p>
+                  )}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
 
       {/* ── Lightbox viewer ─────────────────────────────────────────────── */}
       {selectedMemory && (
@@ -317,28 +363,46 @@ export const MemoriesSection: React.FC = () => {
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
           <div className="relative w-full max-w-lg rounded-3xl glass-panel border border-amber-500/30 p-6 space-y-6 shadow-2xl">
             <div className="flex items-center justify-between border-b border-amber-500/20 pb-3">
-              <h3 className="text-xl font-serif font-bold text-gold-gradient">
-                Add New Memory Card
-              </h3>
+              <div>
+                <h3 className="text-xl font-serif font-bold text-gold-gradient">
+                  Add New Memory Card
+                </h3>
+                {cloudEnabled && (
+                  <p className="text-[10px] text-emerald-400 flex items-center gap-1 mt-0.5">
+                    <CloudUpload className="w-3 h-3" /> Saved to cloud — visible on all devices
+                  </p>
+                )}
+              </div>
               <button
                 onClick={() => setIsAddModalOpen(false)}
-                className="p-2 rounded-full bg-black/40 text-gray-400 hover:text-white"
+                disabled={isUploading}
+                className="p-2 rounded-full bg-black/40 text-gray-400 hover:text-white disabled:opacity-50"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
             <form onSubmit={handleAddSubmit} className="space-y-4">
+
+              {/* Upload error banner */}
+              {uploadError && (
+                <div className="flex items-start gap-2 bg-rose-950/60 border border-rose-500/30 rounded-xl p-3 text-rose-300 text-xs">
+                  <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                  <span>{uploadError}</span>
+                </div>
+              )}
+
               <div>
                 <label className="text-xs font-semibold text-amber-300 block mb-1">
-                  Title
+                  Title *
                 </label>
                 <input
                   type="text"
                   value={newTitle}
                   onChange={(e) => setNewTitle(e.target.value)}
                   placeholder="e.g. Moonlight Stroll"
-                  className="w-full px-4 py-2.5 rounded-xl bg-black/60 border border-amber-500/20 text-white text-sm focus:border-amber-400 focus:outline-none"
+                  className="w-full px-4 py-2.5 rounded-xl bg-black/60 border border-amber-500/20 text-white text-sm focus:border-amber-400 focus:outline-none disabled:opacity-50"
+                  disabled={isUploading}
                   required
                 />
               </div>
@@ -353,7 +417,8 @@ export const MemoriesSection: React.FC = () => {
                     onChange={(e) =>
                       setNewCategory(e.target.value as MemoryCategory)
                     }
-                    className="w-full px-3 py-2.5 rounded-xl bg-black/60 border border-amber-500/20 text-white text-sm focus:border-amber-400 focus:outline-none"
+                    disabled={isUploading}
+                    className="w-full px-3 py-2.5 rounded-xl bg-black/60 border border-amber-500/20 text-white text-sm focus:border-amber-400 focus:outline-none disabled:opacity-50"
                   >
                     {categories
                       .filter((c) => c !== "ALL")
@@ -374,32 +439,53 @@ export const MemoriesSection: React.FC = () => {
                     value={newDate}
                     onChange={(e) => setNewDate(e.target.value)}
                     placeholder="e.g. Oct 2024"
-                    className="w-full px-4 py-2.5 rounded-xl bg-black/60 border border-amber-500/20 text-white text-sm focus:border-amber-400 focus:outline-none"
+                    disabled={isUploading}
+                    className="w-full px-4 py-2.5 rounded-xl bg-black/60 border border-amber-500/20 text-white text-sm focus:border-amber-400 focus:outline-none disabled:opacity-50"
                   />
                 </div>
               </div>
 
               <div>
                 <label className="text-xs font-semibold text-amber-300 block mb-1">
-                  Image Source
+                  Image Source *
                 </label>
                 <div className="space-y-2">
                   <input
                     type="text"
-                    value={newImageUrl}
-                    onChange={(e) => setNewImageUrl(e.target.value)}
-                    placeholder="Paste image URL (or select file below)"
-                    className="w-full px-4 py-2 rounded-xl bg-black/60 border border-amber-500/20 text-white text-xs focus:border-amber-400 focus:outline-none"
+                    value={selectedFile ? "" : newImageUrl}
+                    onChange={(e) => {
+                      setNewImageUrl(e.target.value);
+                      if (e.target.value) {
+                        setSelectedFile(null);
+                        if (fileInputRef.current) fileInputRef.current.value = "";
+                      }
+                      setUploadError(null);
+                    }}
+                    placeholder="Paste image URL (or select a file below)"
+                    disabled={isUploading || !!selectedFile}
+                    className="w-full px-4 py-2 rounded-xl bg-black/60 border border-amber-500/20 text-white text-xs focus:border-amber-400 focus:outline-none disabled:opacity-50"
                   />
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-gray-500">or upload local file:</span>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs text-gray-500">
+                      {cloudEnabled ? "or upload to cloud:" : "or upload local file:"}
+                    </span>
                     <input
+                      ref={fileInputRef}
                       type="file"
-                      accept="image/*"
-                      onChange={handleFileUpload}
-                      className="text-xs text-amber-300 file:mr-2 file:py-1 file:px-3 file:rounded-full file:border-0 file:text-xs file:bg-amber-950 file:text-amber-200"
+                      accept="image/jpeg,image/jpg,image/png,image/webp,image/gif,image/*"
+                      onChange={handleFileSelect}
+                      disabled={isUploading}
+                      className="text-xs text-amber-300 file:mr-2 file:py-1 file:px-3 file:rounded-full file:border-0 file:text-xs file:bg-amber-950 file:text-amber-200 disabled:opacity-50"
                     />
                   </div>
+                  {selectedFile && (
+                    <p className="text-[10px] text-emerald-400">
+                      ✓ {selectedFile.name} ({(selectedFile.size / 1024 / 1024).toFixed(1)} MB) — ready to upload
+                    </p>
+                  )}
+                  <p className="text-[10px] text-gray-500">
+                    Supported: JPG, PNG, WEBP, GIF · Max 15 MB
+                  </p>
                 </div>
               </div>
 
@@ -412,7 +498,8 @@ export const MemoriesSection: React.FC = () => {
                   onChange={(e) => setNewCaption(e.target.value)}
                   placeholder="Write a sweet memory caption..."
                   rows={3}
-                  className="w-full px-4 py-2.5 rounded-xl bg-black/60 border border-amber-500/20 text-white text-sm focus:border-amber-400 focus:outline-none resize-none"
+                  disabled={isUploading}
+                  className="w-full px-4 py-2.5 rounded-xl bg-black/60 border border-amber-500/20 text-white text-sm focus:border-amber-400 focus:outline-none resize-none disabled:opacity-50"
                 />
               </div>
 
@@ -420,15 +507,21 @@ export const MemoriesSection: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setIsAddModalOpen(false)}
-                  className="px-5 py-2 rounded-full bg-black/40 text-gray-400 text-xs font-semibold"
+                  disabled={isUploading}
+                  className="px-5 py-2 rounded-full bg-black/40 text-gray-400 text-xs font-semibold disabled:opacity-50"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-6 py-2.5 rounded-full bg-gradient-to-r from-amber-600 to-rose-700 text-white text-xs font-semibold tracking-wider shadow-md hover:scale-105 transition-transform"
+                  disabled={isUploading}
+                  className="px-6 py-2.5 rounded-full bg-gradient-to-r from-amber-600 to-rose-700 text-white text-xs font-semibold tracking-wider shadow-md hover:scale-105 transition-transform disabled:opacity-50 disabled:scale-100 flex items-center gap-2"
                 >
-                  Save Memory
+                  {isUploading ? (
+                    <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Saving…</>
+                  ) : (
+                    "Save Memory"
+                  )}
                 </button>
               </div>
             </form>

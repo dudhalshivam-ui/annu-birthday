@@ -1,4 +1,4 @@
-﻿import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from "react";
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from "react";
 import type {
   ChapterId,
   SlotId,
@@ -27,6 +27,12 @@ import {
   persistDeleteMemory,
   seedDefaultMemoriesOnce,
 } from "../services/memoryStorageService";
+import {
+  fetchAllMemories,
+  addMemoryToSupabase,
+  deleteMemoryFromSupabase,
+} from "../services/memoryService";
+import type { AddMemoryInput } from "../services/memoryService";
 
 // ────────────────────────────────────────────────────────────────────────────
 // Static data
@@ -81,8 +87,9 @@ interface BirthdayContextType {
   clearJourneyPhoto:  (chapterId: ChapterId, slotId: SlotId) => Promise<void>;
 
   memories: MemoryItem[];
-  addMemory:    (memory: Omit<MemoryItem, "id" | "createdAt">) => Promise<void>;
+  addMemory:    (input: AddMemoryInput) => Promise<void>;
   deleteMemory: (id: string) => Promise<void>;
+  isMemoriesLoading: boolean;
 
   tracks: Track[];
   currentTrackIndex: number;
@@ -130,6 +137,7 @@ export const BirthdayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [isStorageLoaded, setIsStorageLoaded] = useState<boolean>(false);
   const [isPhotosLoading, setIsPhotosLoading] = useState<boolean>(true);
   const [isMusicLoading, setIsMusicLoading]   = useState<boolean>(true);
+  const [isMemoriesLoading, setIsMemoriesLoading] = useState<boolean>(true);
   const [memories, setMemories]               = useState<MemoryItem[]>([]);
   const [tracks, setTracks]                   = useState<Track[]>(INITIAL_TRACKS);
   const [currentTrackIndex, setCurrentTrackIndex] = useState<number>(0);
@@ -204,9 +212,30 @@ export const BirthdayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         }
       }
 
-      // 3. Memories: seed defaults on FIRST LAUNCH ONLY
-      await seedDefaultMemoriesOnce(INITIAL_MEMORIES);
-      const loadedMemories = await getAllMemories();
+      // 3. Memories: Supabase (cross-device) or IndexedDB fallback (local dev)
+      let loadedMemories: MemoryItem[] = [];
+      if (isSupabaseConfigured()) {
+        loadedMemories = await fetchAllMemories();
+        // If Supabase is empty on first visit, seed the defaults into Supabase
+        if (loadedMemories.length === 0) {
+          // Seed silently — don't block the UI
+          const seedPromises = INITIAL_MEMORIES.map((m) =>
+            addMemoryToSupabase({
+              title: m.title,
+              date: m.date,
+              category: m.category,
+              caption: m.caption,
+              imageUrl: m.imageUrl,
+            }).catch(() => null) // ignore seed failures
+          );
+          const seeded = (await Promise.all(seedPromises)).filter(Boolean) as MemoryItem[];
+          if (seeded.length > 0) loadedMemories = seeded.reverse();
+        }
+      } else {
+        // DEV FALLBACK: IndexedDB
+        await seedDefaultMemoriesOnce(INITIAL_MEMORIES);
+        loadedMemories = await getAllMemories();
+      }
 
       if (isMounted) {
         journeyPhotosRef.current = loadedPhotos;
@@ -216,6 +245,7 @@ export const BirthdayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         setIsStorageLoaded(true);
         setIsPhotosLoading(false);
         setIsMusicLoading(false);
+        setIsMemoriesLoading(false);
       }
     };
 
@@ -292,14 +322,33 @@ export const BirthdayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     []
   );
 
-  // ── Memories ──────────────────────────────────────────────────────────────
-  const addMemory = useCallback(async (newMem: Omit<MemoryItem, "id" | "createdAt">): Promise<void> => {
-    const mem = await persistAddMemory(newMem);
+  // ── Memories (Supabase cross-device or IndexedDB fallback) ───────────────
+  const addMemory = useCallback(async (input: AddMemoryInput): Promise<void> => {
+    let mem: MemoryItem;
+    if (isSupabaseConfigured()) {
+      mem = await addMemoryToSupabase(input);
+    } else {
+      // DEV fallback: use blob URL if a file was given, else use imageUrl
+      const imageUrl = input.imageFile
+        ? URL.createObjectURL(input.imageFile)
+        : (input.imageUrl ?? "");
+      mem = await persistAddMemory({
+        title:    input.title,
+        date:     input.date,
+        category: input.category,
+        caption:  input.caption,
+        imageUrl,
+      });
+    }
     setMemories((prev) => [mem, ...prev]);
   }, []);
 
   const deleteMemory = useCallback(async (id: string): Promise<void> => {
-    await persistDeleteMemory(id);
+    if (isSupabaseConfigured()) {
+      await deleteMemoryFromSupabase(id);
+    } else {
+      await persistDeleteMemory(id);
+    }
     setMemories((prev) => prev.filter((m) => m.id !== id));
   }, []);
 
@@ -349,6 +398,7 @@ export const BirthdayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         getJourneyPhoto, getJourneyPhotoUrl,
         setJourneyPhoto, clearJourneyPhoto,
         memories, addMemory, deleteMemory,
+        isMemoriesLoading,
         tracks, currentTrackIndex, isPlaying, setIsPlaying,
         playNextTrack, playPrevTrack, addTrack, deleteTrack,
         isStorageLoaded,
